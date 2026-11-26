@@ -1159,6 +1159,15 @@ pub(crate) fn alone_line(frames: f64) {
     );
 }
 
+/// Held by a test while it plays the submission, from its [`ask_once`] to
+/// its [`ask_once_end`]. The runtime has one submission at a time, and
+/// `ask_once` ends whatever asking stands, another test's as well.
+#[cfg(test)]
+pub(crate) fn submission_in_test() -> std::sync::MutexGuard<'static, ()> {
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ONE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// The submission's one asking stands no longer: its refreshes are done,
 /// or title memory was written in a way the journal was not told.
 pub(crate) fn ask_once_end() {
@@ -4332,6 +4341,7 @@ mod tests {
     /// copied.
     #[test]
     fn the_rest_of_the_one_asking_has_a_number_of_its_own() {
+        let _one = submission_in_test();
         // SAFETY: a fresh write-watched allocation, freed at the end.
         let p = unsafe {
             VirtualAlloc(std::ptr::null(), 4 * PAGE, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE)
@@ -5894,6 +5904,7 @@ mod port7_tests {
                 let mut last = [0u64; HALF];
                 let mut seed = 99;
                 for round in 0..400 {
+                    let _one = submission_in_test();
                     PORT_JOURNAL_IN_TEST.set(port == 1 || round % 2 == 0);
                     let before: Vec<usize> = (0..3).map(|_| rng(&mut seed, HALF)).collect();
                     for &p in &before {
