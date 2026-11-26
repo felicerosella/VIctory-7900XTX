@@ -3658,9 +3658,13 @@ pub fn title_memory_unmapping(at: usize, len: usize) {
 /// of the next memory at the address.
 pub fn title_memory_freed(at: usize, len: usize) {
     if len != 0 {
-        forget_views(at / BLOCK, at.saturating_add(len).div_ceil(BLOCK));
+        let last = at.saturating_add(len).div_ceil(BLOCK);
+        forget_views(at / BLOCK, last);
+        forget_beside(at / BLOCK, last);
     } else if VIEWS.any(at / BLOCK, at / BLOCK + 1) {
-        forget_views(at / BLOCK, allocation_end(at, at).div_ceil(BLOCK).max(at / BLOCK + 1));
+        let last = allocation_end(at, at).div_ceil(BLOCK).max(at / BLOCK + 1);
+        forget_views(at / BLOCK, last);
+        forget_beside(at / BLOCK, last);
     }
     let mut g = guards();
     let first = at / BLOCK;
@@ -3723,6 +3727,22 @@ fn forget_views(first: usize, last: usize) {
     }
 }
 
+/// What was put in beside the guards of `[first, last)` ([`BESIDE`], and the
+/// blocks' share of it) is forgotten: it was for memory no longer there, and
+/// the next memory at the address would take the bit as its own and be told
+/// as written by an asking that comes before any write.
+fn forget_beside(first: usize, last: usize) {
+    if !BESIDE.any(first, last) {
+        return;
+    }
+    let set: Vec<usize> = BESIDE.set_in(first, last).collect();
+    for block in set {
+        if BESIDE.take(block) {
+            put_count(block).store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 /// Tells what keeps track of what title memory shows; the guards, with no
 /// block of the range known unmapped.
 fn title_memory_changed(at: usize, len: usize) -> std::sync::RwLockWriteGuard<'static, Guards> {
@@ -3735,6 +3755,7 @@ fn title_memory_changed(at: usize, len: usize) -> std::sync::RwLockWriteGuard<'s
     crate::inplace::title_memory_freeing(at, len);
     let mut g = guards();
     let range = at / BLOCK..at.saturating_add(len).div_ceil(BLOCK);
+    forget_beside(range.start, range.end);
     let absent: Vec<usize> = g.absent.range(range.clone()).collect();
     for block in absent {
         g.absent.remove(block);
@@ -4863,6 +4884,38 @@ mod tests {
         assert_eq!(guard(one, one + BLOCK), Some(vec![page(one)]));
         assert_eq!(guard(one, one + BLOCK), Some(Vec::new()));
         drop_views(section, &[one, two], BLOCK);
+        crate::title_memory_section_gone(section);
+    }
+
+    /// Bytes put in beside a guard leave no mark at the address once the
+    /// memory is freed or no longer mapped there: the next memory at it would
+    /// be told as written before anything is.
+    #[test]
+    fn what_was_put_beside_goes_with_the_memory() {
+        let (section, one, two) = two_views(BLOCK);
+        crate::title_memory_section(section, BLOCK as u64, true);
+        for view in [one, two] {
+            assert_eq!(guard(view, view + BLOCK), Some(vec![view / PAGE]));
+        }
+        assert!(writes(one, one + BLOCK, true).is_some() && writes(two, two + BLOCK, true).is_some());
+        put_count(one / BLOCK).store(0, std::sync::atomic::Ordering::Relaxed);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            // SAFETY: a byte of the section's only page.
+            match put_beside(one / BLOCK, 1, |delta| unsafe { ((one + 100).wrapping_add(delta) as *mut u8).write(7) }) {
+                Beside::Done => break,
+                // (Other tests hold changes of mapping.)
+                Beside::Cannot if std::time::Instant::now() < deadline => std::hint::spin_loop(),
+                other => panic!("put_beside: {other:?}"),
+            }
+        }
+        let beside = |view: usize| BESIDE.any(view / BLOCK, view / BLOCK + 1);
+        assert!(beside(one) && beside(two));
+        title_memory_freed(two, BLOCK);
+        assert!(!beside(two), "the freed view keeps its mark");
+        assert!(beside(one), "the other view lost its mark");
+        drop_views(section, &[one, two], BLOCK);
+        assert!(!beside(one));
         crate::title_memory_section_gone(section);
     }
 
