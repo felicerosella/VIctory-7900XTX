@@ -668,16 +668,24 @@ mod tests {
     }
 
     /// The tests below want processes of their own with the relay on: each
-    /// `VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 VICTORY_UPCOPY_CHECK=1 cargo
-    /// test -p victory-gpu --lib upcheck -- --ignored --test-threads=1
-    /// <name>`.
+    /// `VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 VICTORY_UPCOPY_CHECK=1
+    /// VICTORY_CARD_BUFFERS_MIN_MB=1 cargo test -p victory-gpu --lib upcheck
+    /// -- --ignored --test-threads=1 <name>`.
+    ///
+    /// Their copies of `LEN` bytes are to be in the card's memory, and the
+    /// least size that goes there depends on the card (`card_limits`: 16 MiB
+    /// with a budget of 12 GiB or less, 1 MiB from 20 GiB):
+    /// `VICTORY_CARD_BUFFERS_MIN_MB=1` makes it the same on every card.
     const LEN: usize = 4 << 20;
+
+    const NOT_CARDED: &str = "the copy is not in the card's memory: on a card with 12 GiB or less, copies under 16 MiB \
+                              stay in the PC's unless VICTORY_CARD_BUFFERS_MIN_MB=1";
 
     /// Title memory of our own (write-watched, or a view of a section, which
     /// is guarded), and the card copy of the title buffer it is.
     fn title(resource: usize, view: bool) -> (&'static mut [u8], usize, std::sync::Arc<Shadow>) {
         let all = title_of(resource, view, LEN);
-        assert!(all.2.carded(), "the copy is in the card's memory");
+        assert!(all.2.carded(), "{NOT_CARDED}");
         all
     }
 
@@ -752,7 +760,7 @@ mod tests {
     /// what it found. Without `VICTORY_FETCH_CHECK` title memory keeps what
     /// was in between, and the next refresh of the 64 KiB sends it up.
     #[test]
-    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 VICTORY_FETCH_CHECK=1 and a process of its own"]
+    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 VICTORY_CARD_BUFFERS_MIN_MB=1 VICTORY_FETCH_CHECK=1 and a process of its own"]
     fn a_result_caught_in_between_is_put_right() {
         let Some(host) = host() else {
             return;
@@ -804,7 +812,7 @@ mod tests {
     /// not known. The title writes another byte of the piece: it goes up
     /// whole, with title memory's older bytes, and the check says so.
     #[test]
-    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 VICTORY_UPCOPY_CHECK=1 and a process of its own"]
+    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 VICTORY_CARD_BUFFERS_MIN_MB=1 VICTORY_UPCOPY_CHECK=1 and a process of its own"]
     fn the_check_finds_an_undeclared_write_undone() {
         let Some(host) = host() else {
             return;
@@ -837,7 +845,7 @@ mod tests {
     /// A shader that writes through views it picks: its buffer is found when
     /// it comes to it in turn, and what it writes from then on is landed.
     #[test]
-    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 VICTORY_PICKED_WRITES=2 VICTORY_PICKED_MB=1 and a process of its own"]
+    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 VICTORY_CARD_BUFFERS_MIN_MB=1 VICTORY_PICKED_WRITES=2 VICTORY_PICKED_MB=1 and a process of its own"]
     fn writes_through_picked_views_come_back() {
         let Some(host) = host() else {
             return;
@@ -888,7 +896,11 @@ mod tests {
             return;
         };
         let (title, start, shadow) = title_of(resource, true, len);
-        assert_eq!(shadow.carded(), carded, "where the copy is");
+        if carded {
+            assert!(shadow.carded(), "{NOT_CARDED}");
+        } else {
+            assert!(!shadow.carded(), "the copy is in the card's memory");
+        }
         let slow = Slow::new(host);
         let (out, out_data) = host.shared_buffer(1 << 16).unwrap();
         let mut lists = Vec::new();
@@ -943,7 +955,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 and a process of its own"]
+    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 VICTORY_CARD_BUFFERS_MIN_MB=1 and a process of its own"]
     fn each_submission_reads_its_own_copy_on_the_card() {
         each_reads_its_own(LEN, 0x7777, true);
     }
@@ -974,6 +986,10 @@ mod tests {
             return;
         };
         let buffers: Vec<_> = sizes.iter().enumerate().map(|(i, &n)| title_of(resource + i, i == 0, n)).collect();
+        // Else a test of copies on the card passes on the PC's alone.
+        for (b, &n) in buffers.iter().zip(&sizes) {
+            assert!(n < LEN || b.2.carded(), "{NOT_CARDED}");
+        }
         let slow = Slow::new(host);
         let (out, out_data) = host.shared_buffer(1 << 20).unwrap();
         let mut seed = 0x9e37_79b9_7f4a_7c15u64 ^ resource as u64;
@@ -1104,7 +1120,7 @@ mod tests {
 
     /// Two buffers with two sides.
     #[test]
-    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 and a process of its own"]
+    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 VICTORY_CARD_BUFFERS_MIN_MB=1 and a process of its own"]
     fn copies_stand_where_the_list_has_them_on_the_card() {
         in_order(0x9100, [LEN, LEN, LEN]);
     }
@@ -1112,13 +1128,13 @@ mod tests {
     /// One in the card's memory, one in the PC's (one side without
     /// `VICTORY_CARD_ALL`).
     #[test]
-    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 and a process of its own"]
+    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 VICTORY_CARD_BUFFERS_MIN_MB=1 and a process of its own"]
     fn copies_stand_where_the_list_has_them_mixed() {
         in_order(0x9200, [LEN, 256 << 10, 256 << 10]);
     }
 
     #[test]
-    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 and a process of its own"]
+    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 VICTORY_CARD_BUFFERS_MIN_MB=1 and a process of its own"]
     fn copies_stand_where_the_list_has_them_in_pc_memory() {
         in_order(0x9300, [256 << 10, 256 << 10, LEN]);
     }
@@ -1126,7 +1142,7 @@ mod tests {
     /// As the title records it: copy, draw, copy, draw in one list; a source
     /// a shader writes first; a counter copied to zero and counted up.
     #[test]
-    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 and a process of its own"]
+    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 VICTORY_CARD_BUFFERS_MIN_MB=1 and a process of its own"]
     fn copy_draw_copy_draw() {
         let Some(host) = host() else {
             return;
@@ -1194,7 +1210,7 @@ mod tests {
     /// the end title memory and the card hold what each wrote last. (A byte
     /// is written by flights or by the title, not both at a time.)
     #[test]
-    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 and a process of its own"]
+    #[ignore = "wants VICTORY_RELAY=2 VICTORY_RELAY_COPY=1 VICTORY_CARD_BUFFERS_MIN_MB=1 and a process of its own"]
     fn declared_writes_beside_the_titles_own_stay() {
         let Some(host) = host() else {
             return;
